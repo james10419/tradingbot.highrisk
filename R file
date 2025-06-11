@@ -1,0 +1,75 @@
+# --- 사전 준비 ---
+# R 콘솔에서 다음 명령어를 실행하여 필요한 패키지를 설치하세요.
+# install.packages("TTR")
+# install.packages("dplyr")
+
+library(TTR)
+library(dplyr)
+
+#' @title get_trading_signal
+#' @description 시세 데이터를 받아 복합적인 기술적 분석을 통해 매매 신호를 생성합니다.
+#' @param data_df Python으로부터 받은 데이터프레임. 'close', 'high', 'low', 'volume' 컬럼을 포함해야 합니다.
+#' @return "BUY", "SELL", 또는 "HOLD" 문자열을 반환합니다.
+get_trading_signal <- function(data_df) {
+  
+  # 데이터가 분석에 충분한지 확인 (RSI, BBands는 보통 14, 20 기간을 사용)
+  if (nrow(data_df) < 21) {
+    return("HOLD")
+  }
+  
+  # --- 1. 보조지표 계산 ---
+  
+  # 거래량 가중 평균 가격 (VWAP), 20기간 기준
+  data_df$vwap <- VWAP(price = data_df$close, volume = data_df$volume, n = 20)
+  
+  # 볼린저 밴드 (Bollinger Bands), 20기간, 2 표준편차
+  bbands <- BBands(data_df[, c("high", "low", "close")], n = 20, sd = 2)
+  data_df <- cbind(data_df, bbands)
+  
+  # 상대 강도 지수 (RSI), 14기간 기준
+  data_df$rsi <- RSI(data_df$close, n = 14)
+
+  # 분석에 필요한 마지막 행(가장 최신 데이터)을 선택
+  last_row <- tail(data_df, 1)
+  
+  # 값이 없는(NA) 행이 있으면 분석 중단
+  if (any(is.na(last_row))) {
+    return("HOLD")
+  }
+  
+  # --- 2. 매매 전략 정의 ---
+  
+  signal <- "HOLD" # 기본 신호는 "HOLD"
+  
+  # **매수 조건 (모두 만족해야 함):**
+  # 1. 가격이 VWAP 위에 있을 것 (단기적으로 시장이 강세임을 의미)
+  # 2. 가격이 볼린저 밴드 하단(dn) 근처에 있을 것 (과매도 상태 후 반등 기대)
+  #    - 하단 밴드와 중간 밴드(mavg) 사이의 아래쪽 30% 영역에 위치할 때
+  # 3. RSI가 과매도 구간(30)을 막 벗어났거나, 과열 구간(70)에 있지 않을 것.
+  
+  is_above_vwap <- last_row$close > last_row$vwap
+  
+  lower_bound_threshold <- last_row$dn + (last_row$mavg - last_row$dn) * 0.3
+  is_near_lower_bband <- last_row$close < lower_bound_threshold
+  
+  is_rsi_ok_for_buy <- last_row$rsi > 30 && last_row$rsi < 65
+  
+  if (is_above_vwap && is_near_lower_bband && is_rsi_ok_for_buy) {
+    signal <- "BUY"
+  }
+  
+  # **매도(청산) 조건 (하나라도 만족하면 됨):**
+  # 1. 가격이 VWAP 아래로 떨어졌을 때 (단기 약세 전환)
+  # 2. RSI가 과매수 구간(75 이상)에 진입했을 때 (수익 실현 시점)
+  
+  is_below_vwap <- last_row$close < last_row$vwap
+  is_rsi_overbought <- last_row$rsi > 75
+  
+  if (is_below_vwap || is_rsi_overbought) {
+    signal <- "SELL"
+  }
+
+  # 최종 신호 반환
+  return(signal)
+}
+
